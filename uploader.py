@@ -1,8 +1,10 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 __author__ = 'Roman Savko'
 
 cfg = {
-    "client_id": "",
-    "secret": "",
+    "client_id": "000000004C139E7F",
+    "secret": "ErsUg9AOApzEiYirzYALdEczEvJQAsWq",
     "token_type": "bearer",
     "token": None,
     "refresh_token": None,
@@ -11,12 +13,15 @@ cfg = {
 
 URL = "https://api.onedrive.com/v1.0"
 redirect_url = "https://login.live.com/oauth20_desktop.srf"
+exclude = ["2004", "Google Photos Backup", "Photos Library.photoslibrary"]
 
 import os
 import requests
 import copy
 import json
 import webbrowser
+import time
+import random
 from threading import Timer
 from urllib import urlencode
 
@@ -105,7 +110,7 @@ def resolve_root_item_id(name, drive_id):
 
 def process_directory(dir, root_item_id):
     for item in os.listdir(dir):
-        if not item.startswith(".") and item != os.path.basename(__file__):
+        if not item.startswith(".") and item != os.path.basename(__file__) and item not in exclude:
             full_path = os.path.join(os.path.realpath(dir), item)
             upload(full_path, root_item_id)
 
@@ -158,6 +163,9 @@ def _upload_file(filename, item_path, parent_id):
                         heads['Content-Range'] = "bytes {}-{}/{}".format(already_uploaded,
                                                                          already_uploaded + len(chunk) - 1, file_size)
                         response = requests.put(uploadUrl, data=chunk, headers=heads)
+                        if response.status_code in range(500, 510, 1):  # apply exponential backoff
+                            print("Server-side error during upload. Using an exponential backoff strategy...")
+                            response = _upload_with_exponential_backoff(uploadUrl, chunk, heads)
                         if response.status_code == requests.codes.accepted:
                             already_uploaded += len(chunk)
                             print("Uploaded bytes: {} out of {}").format(already_uploaded, file_size)
@@ -176,10 +184,26 @@ def _upload_file(filename, item_path, parent_id):
 
         with open(item_path, 'rb') as f:
             response = requests.put(url, data=f, headers=heads)
-            if response.status_code == requests.codes.created:
-                print("Uploaded " + filename)
-            else:
-                response.raise_for_status()
+            if response.status_code in range(500, 510, 1):  # apply exponential backoff
+                print("Server-side error during upload. Using an exponential backoff strategy...")
+                response = _upload_with_exponential_backoff(url, f, heads)
+        if response.status_code == requests.codes.created:
+            print("Uploaded " + filename)
+        else:
+            response.raise_for_status()
+
+
+def _upload_with_exponential_backoff(uploadUrl, chunk, heads):
+    for n in range(0, 10):
+        print("Upload re-try #{}...".format(n))
+        response = requests.put(uploadUrl, data=chunk, headers=heads)
+        print("Response status: {}...".format(response.status_code))
+        if response.status_code in range(500, 510, 1):
+            print("Wait before re-try...")
+            time.sleep((2 ** n) + random.randint(0, 1000) / 1000)
+        else:
+            return response
+    raise IOError("Filed to upload file")
 
 
 if __name__ == '__main__':
