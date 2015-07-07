@@ -3,8 +3,8 @@
 __author__ = 'Roman Savko'
 
 cfg = {
-    "client_id": "000000004C139E7F",
-    "secret": "ErsUg9AOApzEiYirzYALdEczEvJQAsWq",
+    "client_id": "",
+    "secret": "",
     "token_type": "bearer",
     "token": None,
     "refresh_token": None,
@@ -13,7 +13,7 @@ cfg = {
 
 URL = "https://api.onedrive.com/v1.0"
 redirect_url = "https://login.live.com/oauth20_desktop.srf"
-exclude = ["2004", "Google Photos Backup", "Photos Library.photoslibrary"]
+exclude = []
 
 import os
 import requests
