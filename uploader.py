@@ -1,10 +1,18 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 __author__ = 'Roman Savko'
 
+import os
+import requests
+import copy
+import json
+import webbrowser
+import time
+from threading import Timer
+from urllib import urlencode
+
 cfg = {
-    "client_id": "",
-    "secret": "",
+    "client_id": "<Your Client ID>",
+    "secret": "<Your Client Secret>",
     "token_type": "bearer",
     "token": None,
     "refresh_token": None,
@@ -13,17 +21,9 @@ cfg = {
 
 URL = "https://api.onedrive.com/v1.0"
 redirect_url = "https://login.live.com/oauth20_desktop.srf"
-exclude = []
+exclude = ["Google Photos Backup", "Photos Library.photoslibrary"] #folders to exclude
 
-import os
-import requests
-import copy
-import json
-import webbrowser
-import time
-import random
-from threading import Timer
-from urllib import urlencode
+requests.packages.urllib3.disable_warnings()
 
 
 def check_token_valid():
@@ -63,7 +63,9 @@ def init_config(json):
     cfg["refresh_token"] = json["refresh_token"]
     cfg["expires_in"] = json["expires_in"]
     interval = cfg["expires_in"] - (cfg["expires_in"] / 10)
-    Timer(interval, prolong_token).start()
+    timer = Timer(interval, prolong_token)
+    timer.setDaemon(True)
+    timer.start()
     print("Config initialized.")
 
 
@@ -117,7 +119,6 @@ def process_directory(dir, root_item_id):
 
 def upload(item_path, parent_id):
     filename = os.path.basename(item_path)
-    print("Uploading file: \"" + filename + "\"...")
     filename = unicode(filename, "utf-8")
     isdir = os.path.isdir(item_path)
     if isdir:
@@ -136,7 +137,8 @@ def _create_dir(filename, item_path, parent_id):
 
     if response.status_code == requests.codes.created:
         parent_id = response.json()['id']
-        print(u"Folder \"{}\" created as \"{}\".".format(filename, response.json()['name']))
+        if filename != response.json()['name']:
+            print(u"Folder \"{}\" created as \"{}\".".format(filename, response.json()['name']))
         process_directory(item_path, parent_id)
     else:
         print(u"Failed to create directory \"{}\"".format(filename))
@@ -147,28 +149,27 @@ def _upload_file(filename, item_path, parent_id):
     threshold = 10 * 1024 * 1024  # 10Mb
     file_size = os.path.getsize(item_path)
     heads = copy.deepcopy(get_headers())
+    time.sleep(0.2)
+    print(u"\nUploading file {}...".format(filename))
 
     if file_size > threshold:
         url = URL + u"/drive/items/{}:/{}:/upload.createSession".format(parent_id, filename)
         heads['Content-Type'] = 'application/json'
         response = requests.post(url, headers=heads)
         if response.status_code == requests.codes.ok:
-            uploadUrl = response.json()['uploadUrl']
-            already_uploaded = 0
+            upload_url = response.json()['uploadUrl']
+            bytes_uploaded = 0
             with open(item_path, 'rb') as f:
                 while True:
                     chunk = f.read(threshold)
                     if chunk:
                         heads['Content-length'] = len(chunk)
-                        heads['Content-Range'] = "bytes {}-{}/{}".format(already_uploaded,
-                                                                         already_uploaded + len(chunk) - 1, file_size)
-                        response = requests.put(uploadUrl, data=chunk, headers=heads)
-                        if response.status_code in range(500, 510, 1):  # apply exponential backoff
-                            print("Server-side error during upload. Using an exponential backoff strategy...")
-                            response = _upload_with_exponential_backoff(uploadUrl, chunk, heads)
+                        heads['Content-Range'] = "bytes {}-{}/{}".format(bytes_uploaded,
+                                                                         bytes_uploaded + len(chunk) - 1, file_size)
+                        response = _try_upload(upload_url, chunk, heads)
                         if response.status_code == requests.codes.accepted:
-                            already_uploaded += len(chunk)
-                            print("Uploaded bytes: {} out of {}").format(already_uploaded, file_size)
+                            bytes_uploaded += len(chunk)
+                            print("Uploaded bytes: {} out of {}".format(bytes_uploaded, file_size))
                         elif response.status_code == requests.codes.not_found:
                             print("Problem with upload. Starting the entire upload over...")
                             _upload_file(filename, item_path, parent_id)
@@ -179,30 +180,33 @@ def _upload_file(filename, item_path, parent_id):
             response.raise_for_status()
     else:
         url = URL + u"/drive/items/{}:/{}:/content".format(parent_id, filename)
-        heads['Content-Type'] = 'application/octet-stream'
-        heads['Content-length'] = file_size
+        #heads['Content-Type'] = 'application/octet-stream'
+        #heads['Content-length'] = file_size
 
         with open(item_path, 'rb') as f:
-            response = requests.put(url, data=f, headers=heads)
-            if response.status_code in range(500, 510, 1):  # apply exponential backoff
-                print("Server-side error during upload. Using an exponential backoff strategy...")
-                response = _upload_with_exponential_backoff(url, f, heads)
-        if response.status_code == requests.codes.created:
-            print("Uploaded " + filename)
-        else:
-            response.raise_for_status()
+            _try_upload(url, f, heads)
+        print("File uploaded.")
 
 
-def _upload_with_exponential_backoff(uploadUrl, chunk, heads):
-    for n in range(0, 10):
-        print("Upload re-try #{}...".format(n))
-        response = requests.put(uploadUrl, data=chunk, headers=heads)
-        print("Response status: {}...".format(response.status_code))
-        if response.status_code in range(500, 510, 1):
-            print("Wait before re-try...")
-            time.sleep((2 ** n) + random.randint(0, 1000) / 1000)
-        else:
+def _try_upload(url, chunk, heads):
+    response = None
+    for n in range(0, 11):
+        if n > 0:
+            print("Upload re-try #{}...".format(n))
+        try:
+            print("Uploading...".format(n))
+            response = requests.put(url, data=chunk, headers=heads)
+            print("Done.")
+            if response.status_code not in [requests.codes.ok, requests.codes.accepted, requests.codes.created]:
+                print("Response status: {} ({}).".format(response.status_code, response.reason))
+                raise IOError
             return response
+        except IOError as e:
+            print("Exception: " + str(e))
+            time.sleep(2 ** n)
+        finally:
+            if response is not None:
+                response.close()
     raise IOError("Filed to upload file")
 
 
